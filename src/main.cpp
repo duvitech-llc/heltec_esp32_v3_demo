@@ -1,152 +1,201 @@
-// For a connection via I2C using the Arduino Wire include:
-#include <Wire.h>               
+/* Heltec LoRa transmitter/receiver example
+ * Uses RadioLib which properly supports V3 boards
+ */
+
+#include <Wire.h>
+#include <SPI.h>
 #include "HT_SSD1306Wire.h"
-#include "images.h"
-void VextON(void);
-void VextOFF(void);
-static SSD1306Wire  display(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED); // addr , freq , i2c group , resolution , rst
+#include <RadioLib.h>
 
-#define DEMO_DURATION 3000
-typedef void (*Demo)(void);
+// MODE SELECTION: Set to true for transmitter, false for receiver
+#define IS_TRANSMITTER true
 
-int demoMode = 0;
-int counter = 1;
+// Create display instance
+static SSD1306Wire display(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
+
+#define RF_FREQUENCY                                915.0    // MHz
+#define TX_OUTPUT_POWER                             5        // dBm
+#define LORA_BANDWIDTH                              125.0    // kHz
+#define LORA_SPREADING_FACTOR                       7        // [SF7..SF12]
+#define LORA_CODINGRATE                             5        // [5: 4/5, 6: 4/6, 7: 4/7, 8: 4/8]
+#define LORA_PREAMBLE_LENGTH                        8
+
+#define BUFFER_SIZE                                 30
+
+// Pin definitions for Heltec WiFi LoRa 32 V3
+#define RADIO_SCLK_PIN               9
+#define RADIO_MISO_PIN              11
+#define RADIO_MOSI_PIN              10
+#define RADIO_CS_PIN                 8
+#define RADIO_DIO1_PIN              14
+#define RADIO_RST_PIN               12
+#define RADIO_BUSY_PIN              13
+
+// Create radio instance (SX1262 for V3 board)
+SX1262 radio = new Module(RADIO_CS_PIN, RADIO_DIO1_PIN, RADIO_RST_PIN, RADIO_BUSY_PIN);
+
+char txpacket[BUFFER_SIZE];
+double txNumber = 0;
+
+#if !IS_TRANSMITTER
+// Receiver-specific variables
+int16_t rssi_value, snr_value;
+volatile bool receivedFlag = false;
+
+// This function is called when a complete packet is received
+void setFlag(void) {
+    receivedFlag = true;
+}
+#endif
 
 void setup() {
-  Serial.begin(115200);
-  Serial.println();
-  Serial.println();
-  VextON();
-  delay(100);
-
-  // Initialising the UI will init the display too.
-  display.init();
-
-  display.setFont(ArialMT_Plain_10);
-
-}
-
-void drawFontFaceDemo() {
-    // Font Demo1
-    // create more fonts at http://oleddisplay.squix.ch/
-    display.setTextAlignment(TEXT_ALIGN_LEFT);
-    display.setFont(ArialMT_Plain_10);
-    display.drawString(0, 0, "Hello world");
+    Serial.begin(115200);
+    
+    // Turn on Vext power for display
+    pinMode(Vext, OUTPUT);
+    digitalWrite(Vext, LOW);  // Vext is active LOW
+    delay(100);
+    
+    // Initialize display BEFORE SPI
+    display.init();
+    display.setContrast(255);
+    display.clear();
     display.setFont(ArialMT_Plain_16);
-    display.drawString(0, 10, "Hello world");
-    display.setFont(ArialMT_Plain_24);
-    display.drawString(0, 26, "Hello world");
-}
-
-void drawTextFlowDemo() {
-    display.setFont(ArialMT_Plain_10);
     display.setTextAlignment(TEXT_ALIGN_LEFT);
-    display.drawStringMaxWidth(0, 0, 128,
-      "Lorem ipsum\n dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore." );
-}
-
-void drawTextAlignmentDemo() {
-  // Text alignment demo
-  char str[30];
-  int x = 0;
-  int y = 0;
-  display.setFont(ArialMT_Plain_10);
-  // The coordinates define the left starting point of the text
-  display.setTextAlignment(TEXT_ALIGN_LEFT);
-  display.drawString(x, y, "Left aligned (0,0)");
-
-  // The coordinates define the center of the text
-  display.setTextAlignment(TEXT_ALIGN_CENTER);
-  x = display.width()/2;
-  y = display.height()/2-5;
-  sprintf(str,"Center aligned (%d,%d)",x,y);
-  display.drawString(x, y, str);
-
-  // The coordinates define the right end of the text
-  display.setTextAlignment(TEXT_ALIGN_RIGHT);
-  x = display.width();
-  y = display.height()-12;
-  sprintf(str,"Right aligned (%d,%d)",x,y);
-  display.drawString(x, y, str);
-}
-
-void drawRectDemo() {
-      // Draw a pixel at given position
-    for (int i = 0; i < 10; i++) {
-      display.setPixel(i, i);
-      display.setPixel(10 - i, i);
+    
+    // Display initialization message
+    display.drawString(0, 0, "LoRa TX");
+    display.drawString(0, 20, "Initializing...");
+    display.display();
+    
+    // Initialize SPI for LoRa radio
+    SPI.begin(RADIO_SCLK_PIN, RADIO_MISO_PIN, RADIO_MOSI_PIN, RADIO_CS_PIN);
+    
+    Serial.print(F("[SX1262] Initializing ... "));
+    
+    // Initialize SX1262
+    int state = radio.begin();
+    
+    if (state == RADIOLIB_ERR_NONE) {
+        Serial.println(F("success!"));
+        
+        // Configure the radio
+        radio.setFrequency(RF_FREQUENCY);
+        radio.setBandwidth(LORA_BANDWIDTH);
+        radio.setSpreadingFactor(LORA_SPREADING_FACTOR);
+        radio.setCodingRate(LORA_CODINGRATE);
+        radio.setOutputPower(TX_OUTPUT_POWER);
+        radio.setPreambleLength(LORA_PREAMBLE_LENGTH);
+        
+        display.clear();
+#if IS_TRANSMITTER
+        display.drawString(0, 0, "LoRa TX Ready");
+#else
+        display.drawString(0, 0, "LoRa RX Ready");
+#endif
+        display.display();
+        
+    } else {
+        Serial.print(F("failed, code "));
+        Serial.println(state);
+        display.clear();
+        display.drawString(0, 0, "Radio FAIL");
+        display.drawString(0, 20, "Code: " + String(state));
+        display.display();
+        while (true) { delay(10); }
     }
-    display.drawRect(12, 12, 20, 20);
-
-    // Fill the rectangle
-    display.fillRect(14, 14, 17, 17);
-
-    // Draw a line horizontally
-    display.drawHorizontalLine(0, 40, 20);
-
-    // Draw a line horizontally
-    display.drawVerticalLine(40, 0, 20);
-}
-
-void drawCircleDemo() {
-  for (int i=1; i < 8; i++) {
-    display.setColor(WHITE);
-    display.drawCircle(32, 32, i*3);
-    if (i % 2 == 0) {
-      display.setColor(BLACK);
+    
+#if IS_TRANSMITTER
+    Serial.println("Transmitter initialized");
+#else
+    Serial.println("Receiver initialized");
+    
+    // Set interrupt for received packets
+    radio.setDio1Action(setFlag);
+    
+    // Start listening
+    Serial.print(F("[SX1262] Starting to listen ... "));
+    state = radio.startReceive();
+    if (state == RADIOLIB_ERR_NONE) {
+        Serial.println(F("success!"));
+    } else {
+        Serial.print(F("failed, code "));
+        Serial.println(state);
+        while (true) { delay(10); }
     }
-    display.fillCircle(96, 32, 32 - i* 3);
-  }
+#endif
 }
-
-void drawProgressBarDemo() {
-  int progress = (counter / 5) % 100;
-  // draw the progress bar
-  display.drawProgressBar(0, 32, 120, 10, progress);
-
-  // draw the percentage as String
-  display.setTextAlignment(TEXT_ALIGN_CENTER);
-  display.drawString(64, 15, String(progress) + "%");
-}
-
-void drawImageDemo() {
-    // see http://blog.squix.org/2015/05/esp8266-nodemcu-how-to-create-xbm.html
-    // on how to create xbm files
-    display.drawXbm(34, 14, WiFi_Logo_width, WiFi_Logo_height, WiFi_Logo_bits);
-}
-
-void VextON(void)
-{
-  pinMode(Vext,OUTPUT);
-  digitalWrite(Vext, LOW);
-}
-
-void VextOFF(void) //Vext default OFF
-{
-  pinMode(Vext,OUTPUT);
-  digitalWrite(Vext, HIGH);
-}
-
-
-Demo demos[] = {drawFontFaceDemo, drawTextFlowDemo, drawTextAlignmentDemo, drawRectDemo, drawCircleDemo, drawProgressBarDemo, drawImageDemo};
-int demoLength = (sizeof(demos) / sizeof(Demo));
-long timeSinceLastModeSwitch = 0;
 
 void loop() {
-  // clear the display
-  display.clear();
-  // draw the current demo method
-  demos[demoMode]();
-
-  display.setTextAlignment(TEXT_ALIGN_RIGHT);
-  display.drawString(10, 128, String(millis()));
-  // write the buffer to the display
-  display.display();
-
-  if (millis() - timeSinceLastModeSwitch > DEMO_DURATION) {
-    demoMode = (demoMode + 1)  % demoLength;
-    timeSinceLastModeSwitch = millis();
-  }
-  counter++;
-  delay(10);
+#if IS_TRANSMITTER
+    // Transmitter mode
+    delay(1000);
+    
+    txNumber += 0.01;
+    sprintf(txpacket, "Hello world %0.2f", txNumber);
+    
+    Serial.printf("\r\nsending packet \"%s\", length %d\r\n", txpacket, strlen(txpacket));
+    
+    // Update display
+    display.clear();
+    display.setFont(ArialMT_Plain_10);
+    display.drawString(0, 0, "Transmitting:");
+    display.drawString(0, 16, txpacket);
+    display.display();
+    
+    // Transmit
+    int state = radio.transmit((uint8_t *)txpacket, strlen(txpacket));
+    
+    if (state == RADIOLIB_ERR_NONE) {
+        Serial.println("TX done......");
+        display.drawString(0, 32, "TX Success!");
+        display.display();
+    } else {
+        Serial.printf("TX failed, code %d\n", state);
+        display.drawString(0, 32, "TX FAIL: " + String(state));
+        display.display();
+    }
+#else
+    // Receiver mode
+    if(receivedFlag) {
+        receivedFlag = false;
+        
+        String str;
+        int state = radio.readData(str);
+        
+        if (state == RADIOLIB_ERR_NONE) {
+            // Packet received successfully
+            Serial.println(F("[SX1262] Received packet!"));
+            
+            rssi_value = radio.getRSSI();
+            snr_value = radio.getSNR();
+            
+            Serial.print(F("[SX1262] Data:\t\t"));
+            Serial.println(str);
+            Serial.print(F("[SX1262] RSSI:\t\t"));
+            Serial.print(rssi_value);
+            Serial.println(F(" dBm"));
+            Serial.print(F("[SX1262] SNR:\t\t"));
+            Serial.print(snr_value);
+            Serial.println(F(" dB"));
+            
+            // Update display
+            display.clear();
+            display.setFont(ArialMT_Plain_10);
+            display.drawString(0, 0, "Received:");
+            display.drawString(0, 12, str.substring(0, 20));
+            display.drawString(0, 24, "RSSI: " + String(rssi_value) + " dBm");
+            display.drawString(0, 36, "SNR: " + String(snr_value) + " dB");
+            display.display();
+            
+        } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+            Serial.println(F("[SX1262] CRC error!"));
+        } else {
+            Serial.print(F("[SX1262] Failed, code "));
+            Serial.println(state);
+        }
+        
+        radio.startReceive();
+    }
+#endif
 }
